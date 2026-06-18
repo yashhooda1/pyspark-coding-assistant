@@ -1,0 +1,87 @@
+{
+  "name": "pyspark-coding-assistant-finetune",
+  "email_notifications": {
+    "on_failure": ["your@email.com"]
+  },
+  "tasks": [
+    {
+      "task_key": "01_ingest",
+      "description": "Ingest raw data into Bronze Delta table",
+      "notebook_task": {
+        "notebook_path": "/Shared/pyspark-finetune/01_ingest",
+        "source": "WORKSPACE"
+      },
+      "job_cluster_key": "cpu_cluster",
+      "timeout_seconds": 3600
+    },
+    {
+      "task_key": "02_clean",
+      "description": "Clean and filter Bronze into Silver",
+      "depends_on": [{"task_key": "01_ingest"}],
+      "notebook_task": {
+        "notebook_path": "/Shared/pyspark-finetune/02_clean",
+        "source": "WORKSPACE"
+      },
+      "job_cluster_key": "cpu_cluster",
+      "timeout_seconds": 3600
+    },
+    {
+      "task_key": "03_prepare",
+      "description": "Format Silver into Gold prompt/completion pairs",
+      "depends_on": [{"task_key": "02_clean"}],
+      "notebook_task": {
+        "notebook_path": "/Shared/pyspark-finetune/03_prepare",
+        "source": "WORKSPACE"
+      },
+      "job_cluster_key": "cpu_cluster",
+      "timeout_seconds": 3600
+    },
+    {
+      "task_key": "04_train",
+      "description": "LoRA fine-tune on GPU cluster with MLflow tracking",
+      "depends_on": [{"task_key": "03_prepare"}],
+      "notebook_task": {
+        "notebook_path": "/Shared/pyspark-finetune/04_train",
+        "source": "WORKSPACE"
+      },
+      "job_cluster_key": "gpu_cluster",
+      "timeout_seconds": 14400
+    },
+    {
+      "task_key": "05_evaluate",
+      "description": "Evaluate with MLflow LLM eval and deploy to Mosaic AI",
+      "depends_on": [{"task_key": "04_train"}],
+      "notebook_task": {
+        "notebook_path": "/Shared/pyspark-finetune/05_evaluate",
+        "source": "WORKSPACE"
+      },
+      "job_cluster_key": "gpu_cluster",
+      "timeout_seconds": 7200
+    }
+  ],
+  "job_clusters": [
+    {
+      "job_cluster_key": "cpu_cluster",
+      "new_cluster": {
+        "spark_version": "15.4.x-scala2.12",
+        "node_type_id": "i3.xlarge",
+        "num_workers": 2,
+        "spark_conf": {
+          "spark.databricks.delta.preview.enabled": "true"
+        }
+      }
+    },
+    {
+      "job_cluster_key": "gpu_cluster",
+      "new_cluster": {
+        "spark_version": "15.4.x-gpu-ml-scala2.12",
+        "node_type_id": "g5.2xlarge",
+        "num_workers": 0,
+        "driver_node_type_id": "g5.2xlarge",
+        "spark_conf": {
+          "spark.databricks.delta.preview.enabled": "true"
+        }
+      }
+    }
+  ]
+}
