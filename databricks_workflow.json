@@ -1,7 +1,7 @@
 {
   "name": "pyspark-coding-assistant-finetune",
   "email_notifications": {
-    "on_failure": ["your@email.com"]
+    "on_failure": ["yash.hooda6@gmail.com"]
   },
   "tasks": [
     {
