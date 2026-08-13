@@ -1,0 +1,56 @@
+id: upsert_latest_version
+category: delta_merge
+difficulty: medium
+probes: >
+  The core of a MERGE/upsert, expressed without the Delta dependency: collapse
+  a change stream to the latest row per key, then union the keys that only
+  exist in the target. The trap is dropping target rows that the source never
+  touched, which is the difference between an upsert and an overwrite.
+tags: [upsert, scd, dedup, window]
+
+prompt: |
+  `target` is a current-state table and `updates` is a change stream that may
+  contain several rows per id. Produce the post-upsert state:
+
+    - for an id present in `updates`, keep only the row with the highest version
+      from `updates` (it wins over `target` regardless of target's version)
+    - for an id absent from `updates`, keep the `target` row unchanged
+
+  Return columns: id, value, version.
+
+fixtures:
+  - name: target
+    schema: id INT, value STRING, version INT
+    rows:
+      - [1, "old_a", 1]
+      - [2, "old_b", 5]
+      - [3, "old_c", 2]
+  - name: updates
+    schema: id INT, value STRING, version INT
+    rows:
+      - [1, "new_a1", 2]
+      - [1, "new_a2", 3]
+      - [2, "new_b", 4]
+      - [4, "new_d", 1]
+
+solution: |
+  from pyspark.sql import functions as F
+  from pyspark.sql.window import Window
+
+  def solve(spark, target, updates):
+      # 1. collapse the change stream to one winning row per id
+      w = Window.partitionBy("id").orderBy(F.col("version").desc())
+      latest = (
+          updates
+          .withColumn("_rn", F.row_number().over(w))
+          .filter(F.col("_rn") == 1)
+          .drop("_rn")
+      )
+      # 2. keep target rows the stream never mentions. Note id=2 takes the
+      #    update (version 4) even though target's version 5 is higher: the
+      #    spec says the source wins, which is what MERGE ... WHEN MATCHED does.
+      untouched = target.join(latest.select("id"), on="id", how="left_anti")
+      return untouched.unionByName(latest)
+
+compare:
+  mode: rows

@@ -1,0 +1,39 @@
+id: join_anti_null_key
+category: joins
+difficulty: hard
+probes: >
+  NULL is not equal to NULL in a join predicate. A left-anti join therefore
+  KEEPS left rows whose join key is NULL, because they never matched. Models
+  routinely reason about anti-join as "set difference" and drop them.
+tags: [anti_join, null_semantics]
+
+prompt: |
+  From `orders`, return every order that has no matching customer in `customers`,
+  joined on customer_id. Return all columns of `orders` unchanged.
+
+fixtures:
+  - name: orders
+    schema: order_id INT, customer_id INT, amount DOUBLE
+    rows:
+      - [1, 100, 50.0]
+      - [2, 101, 75.5]
+      - [3, 999, 20.0]
+      - [4, null, 10.0]
+      - [5, 100, 5.25]
+      - [6, null, 42.0]
+  - name: customers
+    schema: customer_id INT, name STRING
+    rows:
+      - [100, "ada"]
+      - [101, "grace"]
+      - [102, "alan"]
+
+solution: |
+  def solve(spark, orders, customers):
+      # left_anti keeps left rows with no match. NULL customer_id never matches
+      # anything (NULL = NULL is unknown, not true), so rows 4 and 6 survive.
+      return orders.join(customers, on="customer_id", how="left_anti")
+
+compare:
+  mode: rows
+  check_schema: false

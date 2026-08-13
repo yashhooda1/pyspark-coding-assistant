@@ -1,0 +1,42 @@
+id: null_sum_all_null_group
+category: nulls_types
+difficulty: medium
+probes: >
+  sum() over a group where every value is NULL returns NULL, not 0. The fix is
+  coalesce after the aggregate, not before -- coalescing before changes the
+  average and the count. Models very often emit sum(coalesce(x,0)) which is a
+  different query that happens to agree here but not on avg.
+tags: [null_semantics, sum, coalesce]
+
+prompt: |
+  For each region in `readings`, return the sum of `value` as `total`, but
+  report 0 rather than null when the region has no non-null values at all.
+  `total` must be a LONG (BIGINT) column.
+
+  Return columns: region, total.
+
+fixtures:
+  - name: readings
+    schema: region STRING, value INT
+    rows:
+      - ["north", 5]
+      - ["north", null]
+      - ["north", 7]
+      - ["south", null]
+      - ["south", null]
+      - ["east", 3]
+
+solution: |
+  from pyspark.sql import functions as F
+
+  def solve(spark, readings):
+      # sum() ignores NULLs; an all-NULL group aggregates to NULL, so the
+      # coalesce has to sit outside the aggregate.
+      return (
+          readings
+          .groupBy("region")
+          .agg(F.coalesce(F.sum("value"), F.lit(0)).cast("long").alias("total"))
+      )
+
+compare:
+  mode: rows

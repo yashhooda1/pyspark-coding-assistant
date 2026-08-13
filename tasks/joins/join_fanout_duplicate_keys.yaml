@@ -1,0 +1,44 @@
+id: join_fanout_duplicate_keys
+category: joins
+difficulty: medium
+probes: >
+  An inner join on a non-unique key multiplies rows. The correct total here is
+  a sum over the fanned-out rows, not over the original left rows. Models that
+  mentally model the join as a lookup produce the un-multiplied number.
+tags: [inner_join, fanout, aggregation]
+
+prompt: |
+  Join `sales` to `rates` on region, then return one row per region with columns
+  region and total, where total is the sum of amount * multiplier across every
+  matched pair. Regions in `sales` with no match in `rates` must be excluded.
+
+fixtures:
+  - name: sales
+    schema: sale_id INT, region STRING, amount DOUBLE
+    rows:
+      - [1, "east", 100.0]
+      - [2, "east", 200.0]
+      - [3, "west", 50.0]
+      - [4, "north", 10.0]
+  - name: rates
+    schema: region STRING, multiplier DOUBLE
+    rows:
+      - ["east", 1.0]
+      - ["east", 2.0]
+      - ["west", 3.0]
+
+solution: |
+  from pyspark.sql import functions as F
+
+  def solve(spark, sales, rates):
+      # east has 2 sales x 2 rates = 4 pairs; the sum must cover all of them.
+      joined = sales.join(rates, on="region", how="inner")
+      return (
+          joined
+          .groupBy("region")
+          .agg(F.sum(F.col("amount") * F.col("multiplier")).alias("total"))
+      )
+
+compare:
+  mode: rows
+  float_tolerance: 1.0e-6

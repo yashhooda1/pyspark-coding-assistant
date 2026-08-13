@@ -1,0 +1,42 @@
+id: agg_count_null_semantics
+category: aggregations
+difficulty: medium
+probes: >
+  count(*) counts rows, count(col) skips NULLs, countDistinct(col) skips NULLs
+  and dedups. Three counts that differ only because of NULL handling. Models
+  reach for count("*") for all three, or use count("col") where the prompt
+  asked for rows.
+tags: [count, null_semantics, distinct]
+
+prompt: |
+  For each dept in `staff`, return one row with:
+    - n_rows      the number of rows in the group
+    - n_emails    the number of rows whose email is not null
+    - n_distinct  the number of distinct non-null emails
+
+  Return columns: dept, n_rows, n_emails, n_distinct.
+
+fixtures:
+  - name: staff
+    schema: dept STRING, name STRING, email STRING
+    rows:
+      - ["eng", "ann", "a@x.com"]
+      - ["eng", "bob", null]
+      - ["eng", "cal", "a@x.com"]
+      - ["eng", "dee", "d@x.com"]
+      - ["ops", "eve", null]
+      - ["ops", "fay", null]
+
+solution: |
+  from pyspark.sql import functions as F
+
+  def solve(spark, staff):
+      return staff.groupBy("dept").agg(
+          F.count(F.lit(1)).alias("n_rows"),
+          F.count("email").alias("n_emails"),
+          F.countDistinct("email").alias("n_distinct"),
+      )
+
+compare:
+  mode: rows
+  check_schema: false

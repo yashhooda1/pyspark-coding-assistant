@@ -1,0 +1,51 @@
+id: window_rank_family_ties
+category: windows
+difficulty: medium
+probes: >
+  rank / dense_rank / row_number diverge only in the presence of ties, and
+  rank leaves gaps while dense_rank does not. Fixtures are built so that all
+  three produce different columns.
+tags: [window, rank, dense_rank, row_number]
+
+prompt: |
+  For each row in `scores`, add three columns computed over a window
+  partitioned by team and ordered by points descending:
+    - rnk         using rank()
+    - dense       using dense_rank()
+    - rownum      using row_number()
+
+  Return columns: team, player, points, rnk, dense, rownum.
+  Order the output by team ascending, then points descending, then player ascending.
+
+fixtures:
+  - name: scores
+    schema: team STRING, player STRING, points INT
+    rows:
+      - ["red", "ann", 10]
+      - ["red", "bob", 10]
+      - ["red", "cal", 7]
+      - ["red", "dee", 5]
+      - ["blue", "eve", 3]
+      - ["blue", "fay", 3]
+
+solution: |
+  from pyspark.sql import functions as F
+  from pyspark.sql.window import Window
+
+  def solve(spark, scores):
+      w = Window.partitionBy("team").orderBy(F.col("points").desc())
+      # row_number needs a deterministic tiebreak or the result is not stable
+      # across runs; the prompt pins the output order, so break on player.
+      w_rn = Window.partitionBy("team").orderBy(
+          F.col("points").desc(), F.col("player").asc()
+      )
+      return (
+          scores
+          .withColumn("rnk", F.rank().over(w))
+          .withColumn("dense", F.dense_rank().over(w))
+          .withColumn("rownum", F.row_number().over(w_rn))
+          .orderBy(F.col("team").asc(), F.col("points").desc(), F.col("player").asc())
+      )
+
+compare:
+  mode: ordered_rows

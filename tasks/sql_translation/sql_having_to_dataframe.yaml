@@ -1,0 +1,54 @@
+id: sql_having_to_dataframe
+category: sql_translation
+difficulty: medium
+probes: >
+  HAVING filters after aggregation, WHERE filters before. The query has both,
+  with different predicates, so swapping them changes the answer. Tests whether
+  the model understands the clause order rather than pattern-matching filter().
+tags: [sql, having, where, groupby]
+
+prompt: |
+  Translate this SQL into the PySpark DataFrame API against `txns`
+  (do not use spark.sql or createOrReplaceTempView):
+
+      SELECT store, SUM(amount) AS total
+      FROM txns
+      WHERE status = 'ok'
+      GROUP BY store
+      HAVING COUNT(*) >= 2
+      ORDER BY total DESC
+
+  Return columns: store, total.
+
+fixtures:
+  - name: txns
+    schema: txn_id INT, store STRING, status STRING, amount DOUBLE
+    rows:
+      - [1, "s1", "ok", 100.0]
+      - [2, "s1", "ok", 50.0]
+      - [3, "s1", "void", 999.0]
+      - [4, "s2", "ok", 400.0]
+      - [5, "s2", "void", 1.0]
+      - [6, "s3", "ok", 10.0]
+      - [7, "s3", "ok", 20.0]
+      - [8, "s3", "ok", 30.0]
+
+solution: |
+  from pyspark.sql import functions as F
+
+  def solve(spark, txns):
+      # WHERE before groupBy, HAVING as a filter on the aggregated frame.
+      # s2 has only one 'ok' row, so HAVING COUNT(*) >= 2 removes it.
+      return (
+          txns
+          .filter(F.col("status") == "ok")
+          .groupBy("store")
+          .agg(F.sum("amount").alias("total"), F.count(F.lit(1)).alias("_n"))
+          .filter(F.col("_n") >= 2)
+          .drop("_n")
+          .orderBy(F.col("total").desc())
+      )
+
+compare:
+  mode: ordered_rows
+  float_tolerance: 1.0e-6

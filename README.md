@@ -1,123 +1,246 @@
-# PySpark Coding Assistant — LLM Fine-Tuning Pipeline on Databricks
+# spark-eval
 
-An end-to-end LLM fine-tuning pipeline built on Databricks, using a **bronze → silver → gold** medallion architecture to curate training data and fine-tune **Mistral-7B-Instruct** (or Llama 3 8B) into a PySpark coding assistant.
+**An execution-based benchmark for PySpark code generation.**
 
-**Live demo:** 
-**MLflow experiment:** 
+Every task runs the generated code against a real Spark session and compares the
+resulting DataFrame to a reference. Nothing here scores string similarity.
+
+```bash
+pip install -e .
+spark-eval selfcheck                          # every reference solution executes
+spark-eval run --model ollama:qwen3:4b        # score a local model
+spark-eval run --model openai:gpt-4o-mini --n 5 --k 5 --out report.json
+```
 
 ---
 
-## Architecture
+## Why this exists
 
+I fine-tuned a PySpark coding assistant and evaluated it the way most people do:
+token accuracy, ROUGE, and an LLM judge. It scored **0.833 mean token accuracy**
+and a validation loss of 0.757. By those numbers it worked.
+
+Then I ran the outputs. **One in three was correct.**
+
+The model had learned what PySpark *looks like* — the right imports, plausible
+method chains, idiomatic naming — without learning what the operators *do*. No
+text-similarity metric can see that gap, because the wrong answer and the right
+answer differ by one method name and look equally fluent. An LLM judge does not
+reliably catch it either: judges score fluent, well-structured code generously,
+and `rowsBetween` versus the default RANGE frame is exactly the kind of
+difference a judge waves through.
+
+The only thing that catches it is running the code.
+
+There are execution-based benchmarks for general Python (HumanEval, MBPP) and for
+data science on single-node libraries — DS-1000 covers NumPy, Pandas, SciPy,
+scikit-learn, PyTorch, TensorFlow and Matplotlib. **None of them cover PySpark.**
+That is a strange hole: Spark is the backbone of most enterprise data platforms,
+and those are the platforms currently having LLMs pointed at them.
+
+spark-eval fills it.
+
+## What makes Spark different from pandas
+
+You cannot port a pandas benchmark and call it done. Spark's semantics diverge
+in ways that produce *silently wrong* results rather than exceptions:
+
+- **NULL is not a value.** `NULL = NULL` is unknown, not true. This means a left-anti
+  join keeps NULL-keyed rows, an inner join drops them, and matching NULL to NULL
+  needs `eqNullSafe`. Same operator, three different correct behaviours.
+- **Window frames default to RANGE, not ROWS.** An ordered window with no explicit
+  frame uses `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. With tied
+  ordering keys that is a different answer from the `rowsBetween` version people
+  write. Both look correct in review.
+- **Aggregates swallow NULLs, then return one.** `sum()` skips NULLs, but a group
+  where everything is NULL aggregates to NULL, not 0.
+- **Laziness hides errors.** A broken plan builds fine and fails on the action —
+  so a harness that does not force evaluation will score broken code as working.
+- **Joins fan out.** Non-unique keys multiply rows, and any aggregate downstream
+  silently changes meaning.
+
+Each of those is a category in this suite, chosen because it is a place where
+fluent-looking code is wrong.
+
+## How a task works
+
+A task is one YAML file:
+
+```yaml
+id: window_default_frame_ties
+category: windows
+difficulty: hard
+probes: >
+  With an ORDER BY and no explicit frame, the default is RANGE BETWEEN
+  UNBOUNDED PRECEDING AND CURRENT ROW -- a value range, so tied keys see
+  each other's rows. rowsBetween(...) gives a different, wrong answer.
+
+prompt: |
+  For each row in `events`, compute a running total of value within each
+  user, ordered by ts, using the SQL default window frame. Rows sharing a
+  ts within a user must therefore share the same running total.
+
+fixtures:
+  - name: events
+    schema: user STRING, ts INT, value INT
+    rows:
+      - ["a", 1, 10]
+      - ["a", 2, 20]
+      - ["a", 2, 30]
+
+solution: |
+  from pyspark.sql import functions as F
+  from pyspark.sql.window import Window
+
+  def solve(spark, events):
+      w = Window.partitionBy("user").orderBy("ts")
+      return events.withColumn("running", F.sum("value").over(w))
+
+compare:
+  mode: rows
 ```
-Raw sources          Bronze (Delta)      Silver (Delta)      Gold (Delta)
-──────────────       ──────────────      ──────────────      ──────────────
-HuggingFace HF ───► raw text +      ──► deduped +       ──► [INST] prompt/
-Custom JSONL         metadata            PySpark-scored       completion pairs
-Curated seed                            train/val split      token-counted
 
-           Gold ──► 04_train.py ──► MLflow ──► Unity Catalog ──► Mosaic AI
-                    LoRA / QLoRA      tracking    model registry   endpoint
-                    Mistral 7B        loss curves  Champion alias  REST API
-```
+The model is shown the prompt and the fixture schemas, and asked for
+`solve(spark, **frames) -> DataFrame`. The harness builds the fixtures, runs the
+reference to get the expected DataFrame, runs the candidate, and compares.
 
-## Notebooks
+**Expected output is computed, never stored.** There is no golden file to drift
+out of sync when a fixture is edited.
 
-| Notebook | Layer | What it does |
+### Design decisions worth arguing with
+
+- **Order-insensitive by default.** Most prompts do not pin an ordering, so
+  requiring one would fail correct code. Tasks that *do* ask for a sort set
+  `mode: ordered_rows`.
+- **Multiset, not set.** Duplicate rows matter — otherwise a stray
+  `dropDuplicates()` passes.
+- **Float tolerance.** Spark's floating-point aggregation order varies with
+  partitioning. Exact double equality is a flaky-test generator.
+- **Column order ignored by default.** Selecting the right columns in a
+  different order is not a wrong answer unless the prompt said so.
+- **Schema checked by default.** Returning `BIGINT` where `INT` was asked for is
+  a real bug in a pipeline that writes to a typed table.
+- **Forgiving extraction.** Prose around the code, missing fences, and
+  `<think>` blocks are all handled. The benchmark measures Spark semantics, not
+  formatting compliance — otherwise it would quietly favour models tuned on this
+  exact response style.
+
+## Categories
+
+| Category | Tasks | What it probes |
 |---|---|---|
-| `01_ingest.py` | Bronze | Pulls HuggingFace datasets + curated seed → raw Delta table |
-| `02_clean.py` | Silver | Dedup, PySpark relevance scoring, train/val split |
-| `03_prepare.py` | Gold | Formats rows into Mistral `[INST]` / Llama 3 chat template |
-| `04_train.py` | Train | QLoRA fine-tuning, MLflow auto-logging, UC model registry |
-| `05_evaluate.py` | Eval | MLflow LLM eval, LLM-as-judge, Mosaic AI serving deploy |
+| `joins` | 2 | fanout, anti-join NULL semantics, match vs. NULL value |
+| `windows` | 2 | RANGE vs ROWS frames, rank family under ties |
+| `aggregations` | 2 | count/countDistinct NULL semantics, pivot |
+| `nulls_types` | 2 | null-safe equality, all-NULL groups, coercion |
+| `schema_nested` | 1 | explode vs explode_outer, structs, arrays |
+| `udf_vs_native` | 1 | UDF NULL handling, return types |
+| `sql_translation` | 1 | WHERE vs HAVING, clause ordering |
+| `delta_merge` | 1 | upsert / latest-version-wins semantics |
 
-## Stack
+**12 tasks today.** This is a seed set, not the finished benchmark — it exists to
+prove the harness and fix the shape of a task. Target is 150–200, hand-written.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-- **Compute:** Databricks ML Runtime 15.x GPU (`g5.2xlarge` / 1× A10G)
-- **Data:** Delta Lake + Unity Catalog
-- **Fine-tuning:** HuggingFace `transformers` + `peft` (LoRA), `trl` (SFTTrainer)
-- **Quantization:** 4-bit NF4 QLoRA via `bitsandbytes`
-- **Tracking:** MLflow (params, metrics, loss curves, model artifacts)
-- **Registry:** Unity Catalog model registry with Champion alias
-- **Serving:** Mosaic AI Model Serving (GPU Small, scale-to-zero)
+Deliberately: 150 good tasks beat 1,000 generated ones. The fixtures and
+assertions here are written by hand, because a benchmark whose assertions were
+LLM-generated measures the generator, not the model under test.
 
-## Key Design Decisions
+## Is the benchmark itself correct?
 
-**Why LoRA over full fine-tuning?**  
-LoRA adds trainable low-rank matrices to attention layers, updating only ~0.6% of model parameters. This makes 7B model fine-tuning possible on a single A10G (24GB VRAM) in under 2 hours, with quality close to full fine-tuning.
+Two mechanisms, both enforced in CI.
 
-**Why the medallion architecture for training data?**  
-The bronze → silver → gold pattern makes the data pipeline auditable and rerunnable. You can adjust the PySpark relevance threshold in silver, reformat prompts in gold, and retrain — without re-ingesting raw data.
+**`spark-eval selfcheck`** executes every reference solution and compares it to
+itself. A task whose gold answer does not run produces meaningless scores for
+every model, so this is a hard gate.
 
-**PySpark relevance scoring**  
-Silver layer scores each row on a 50-keyword PySpark vocabulary. This is the key curation step — filtering generic Python Q&A down to PySpark-specific patterns without manual labeling.
+**Mutation tests** are the real check. Every task ships with a *mutant* — the
+specific wrong implementation a model actually tends to produce — and the suite
+asserts the harness rejects it:
 
-**Deterministic train/val split**  
-Uses `hash(instruction) % 100` rather than a random split, so the split is reproducible across pipeline runs and data refreshes.
-
-## MLflow Experiment Metrics
-
-| Metric | Value |
+| Task | Mutant that must fail |
 |---|---|
-| Final eval loss | ~1.2 |
-| Final perplexity | ~3.3 |
-| PySpark correctness (LLM judge, /5) | ~3.9 |
-| Trainable parameters (LoRA) | ~0.6% of 7B |
-| Training time (1× A10G, 3 epochs) | ~90 min |
+| `join_anti_null_key` | treats anti-join as set difference, dropping NULL keys |
+| `window_default_frame_ties` | explicit ROWS frame instead of default RANGE |
+| `null_safe_equality_join` | plain `==`, dropping the NULL/NULL pair |
+| `nested_explode_outer_empty` | `explode` instead of `explode_outer` |
+| `agg_count_null_semantics` | `count("*")` for all three counts |
+| `upsert_latest_version` | overwrite instead of upsert, losing target-only rows |
+| … | one per task, enforced by `test_every_task_has_a_mutant` |
 
-*[Add your actual MLflow screenshot here]*
+Without this, a comparator that always returned `True` would pass selfcheck
+perfectly. `pytest` currently runs **50 tests**: 12 mutants, the pairing check,
+and unit tests covering NULL sorting, nested structs, multiset semantics, lazy
+evaluation, timeouts, the import guard, and the pass@k estimator.
 
-## How to Run
+## Scoring
 
-### Prerequisites
-- Databricks workspace (AWS or Azure)
-- Unity Catalog enabled
-- GPU cluster: ML Runtime 15.x, `g5.2xlarge` (AWS) or `Standard_NC6s_v3` (Azure)
-- HuggingFace token (for gated models like Llama 3): set as Databricks secret
+`pass@k` uses the unbiased estimator from Chen et al. (2021), not "did any of k
+samples pass" — the naive version is biased upward and not comparable across
+different `n`.
 
-### Setup
-```bash
-# 1. Import notebooks into your Databricks workspace
-# Workspace → Import → select all .py files from notebooks/
+Reports break down by category, by difficulty, and by **failure mode**, because
+the interesting output is not the headline number:
 
-# 2. Set up Databricks secrets for HuggingFace (if using Llama 3)
-databricks secrets create-scope ml-secrets
-databricks secrets put --scope ml-secrets --key hf-token
+```
+  pass@1      41.7%
 
-# 3. Run notebooks in order via Databricks Workflow, or manually:
-# 01_ingest → 02_clean → 03_prepare → 04_train → 05_evaluate
+  By category
+    windows                  0.0%  (2 tasks)
+    nulls_types             50.0%  (2 tasks)
+    joins                  100.0%  (2 tasks)
+
+  Failure modes
+    row_mismatch              4  (57%)
+    error                     2  (29%)
+    schema_mismatch           1  (14%)
 ```
 
-### Run as a Databricks Workflow
-1. **Workflows** → **Create job**
-2. Add 5 tasks in sequence, one per notebook
-3. Task 1–3: CPU cluster (14.3 LTS or later)
-4. Task 4–5: GPU cluster (ML Runtime 15.x GPU)
-5. Schedule or run now
+`row_mismatch` means the model wrote runnable Spark that computed the wrong
+thing. That is the number this benchmark was built to expose.
 
-## Sample Model Output
+## Backends
 
-**Input:** "How do I calculate a 7-day rolling average of revenue per store in PySpark?"
+| Spec | Backend |
+|---|---|
+| `ollama:qwen3:4b` | local Ollama server (`OLLAMA_HOST`) |
+| `openai:gpt-4o-mini` | any OpenAI-compatible endpoint (`OPENAI_BASE_URL`) |
+| `dummy:reference` | echoes gold solutions; must score 100% |
+| `dummy:empty` | returns nothing; must score 0% |
 
-**Output:**
-```python
-from pyspark.sql import Window
-from pyspark.sql.functions import avg, col
+The OpenAI-compatible adapter covers vLLM, llama.cpp's server, TGI, OpenRouter,
+and the hosted frontier APIs. Adding a backend is one method.
 
-# Define a 7-day rolling window per store
-window_7d = (
-    Window
-    .partitionBy("store_id")
-    .orderBy(col("sale_date").cast("long"))
-    .rangeBetween(-6 * 86400, 0)  # 7 days in seconds
-)
+## Safety
 
-df = df.withColumn("revenue_7d_avg", avg("revenue").over(window_7d))
-```
+`spark-eval run` **executes untrusted model output in your Python process.** The
+import guard blocks `os`, `subprocess`, `shutil`, `socket`, `pathlib` and friends,
+which stops a model that decides to tidy up your filesystem. It is not a security
+boundary and is not meant to be one — a determined adversary gets out of it.
 
-## Author
+If you are scoring checkpoints you did not train, run it in a container with no
+network and a read-only mount.
 
-**Yash Hooda** — Data Engineer → AI Engineer  
-[LinkedIn](https://linkedin.com/in/yashhooda) · [Portfolio](https://yashhooda.ai) · [Strava](https://strava.com)
+## Roadmap
 
-Certifications: Databricks Certified Data Engineer Associate · IBM AI Engineering · IBM Data Science
+- [ ] 150–200 tasks (12 today)
+- [ ] Real Delta Lake tasks behind a `[delta]` extra — the current `delta_merge`
+      task tests upsert *logic* without the `delta-spark` dependency
+- [ ] Subprocess isolation per task (`--isolate`)
+- [ ] Published leaderboard as a Hugging Face Space
+- [ ] Contamination canaries to detect training on the suite
+
+## Related work
+
+- **HumanEval** / **MBPP** — general Python, execution-based. No data-engineering surface.
+- **[DS-1000](https://proceedings.mlr.press/v202/lai23b/lai23b.pdf)** — the closest
+  relative: execution-based, data science, seven libraries. No Spark.
+- **[CodeBenchGen](https://arxiv.org/pdf/2404.00566v2)** — generates execution
+  sandboxes automatically. Complementary; spark-eval hand-writes assertions
+  because the failure modes it targets are too subtle to generate reliably.
+
+## License
+
+Apache-2.0.
+
+Built by [Yash Hooda](https://www.yashhooda.ai/) — [Hugging Face](https://huggingface.co/hoodarunner) · [Ollama](https://ollama.com/hoodarunner)

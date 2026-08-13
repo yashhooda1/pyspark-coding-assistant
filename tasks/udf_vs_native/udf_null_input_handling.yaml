@@ -1,0 +1,42 @@
+id: udf_null_input_handling
+category: udf_vs_native
+difficulty: medium
+probes: >
+  A Python UDF is called with None for NULL input rather than being skipped, so
+  an unguarded body raises and fails the whole stage. Also pins the return type:
+  an unannotated UDF defaults to StringType and silently stringifies integers.
+tags: [udf, null_semantics, return_type]
+
+prompt: |
+  Add a column `n_words` to `notes` containing the number of whitespace-separated
+  words in `text`. Rows where text is null must get null (not 0, not an error).
+  `n_words` must be an INT column.
+
+  Return columns: note_id, text, n_words.
+
+fixtures:
+  - name: notes
+    schema: note_id INT, text STRING
+    rows:
+      - [1, "hello world"]
+      - [2, null]
+      - [3, "one"]
+      - [4, "  padded   words here  "]
+      - [5, ""]
+
+solution: |
+  from pyspark.sql import functions as F
+  from pyspark.sql.types import IntegerType
+
+  def solve(spark, notes):
+      # The None guard is mandatory: Spark hands NULL to the UDF as None.
+      def count_words(s):
+          if s is None:
+              return None
+          return len(s.split())
+
+      word_udf = F.udf(count_words, IntegerType())
+      return notes.withColumn("n_words", word_udf(F.col("text")))
+
+compare:
+  mode: rows

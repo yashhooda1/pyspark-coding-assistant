@@ -1,0 +1,42 @@
+id: window_default_frame_ties
+category: windows
+difficulty: hard
+probes: >
+  The single most-missed detail in Spark windows. With an ORDER BY and no
+  explicit frame, the default is RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT
+  ROW -- a *value* range, so tied ordering keys all see each other's rows.
+  Writing rowsBetween(Window.unboundedPreceding, 0) gives a different, wrong
+  answer on ties. Both look identical in a code review.
+tags: [window, frame, range_vs_rows, ties]
+
+prompt: |
+  For each row in `events`, compute a running total of value within each user,
+  ordered by ts, using the SQL default window frame (RANGE BETWEEN UNBOUNDED
+  PRECEDING AND CURRENT ROW). Rows that share the same ts within a user must
+  therefore share the same running total.
+
+  Return columns: user, ts, value, running.
+
+fixtures:
+  - name: events
+    schema: user STRING, ts INT, value INT
+    rows:
+      - ["a", 1, 10]
+      - ["a", 2, 20]
+      - ["a", 2, 30]
+      - ["a", 3, 40]
+      - ["b", 1, 5]
+      - ["b", 1, 7]
+
+solution: |
+  from pyspark.sql import functions as F
+  from pyspark.sql.window import Window
+
+  def solve(spark, events):
+      # No rowsBetween/rangeBetween call: this is the SQL default frame,
+      # which is RANGE-based. The two ts=2 rows for user 'a' both get 60.
+      w = Window.partitionBy("user").orderBy("ts")
+      return events.withColumn("running", F.sum("value").over(w))
+
+compare:
+  mode: rows

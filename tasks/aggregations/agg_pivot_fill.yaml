@@ -1,0 +1,44 @@
+id: agg_pivot_fill
+category: aggregations
+difficulty: medium
+probes: >
+  pivot produces NULL for absent combinations, and the pivot column values
+  determine the output schema. Pinning the value list is also the difference
+  between one Spark job and two -- an unpinned pivot triggers an extra scan to
+  discover distinct values.
+tags: [pivot, groupby, null_fill]
+
+prompt: |
+  Pivot `sales_long` so there is one row per store and one column per quarter,
+  with columns named exactly Q1, Q2, Q3, containing the sum of amount.
+  Missing combinations must be 0, not null. All three quarter columns must be
+  present even if a quarter never appears in the data.
+
+  Return columns: store, Q1, Q2, Q3.
+
+fixtures:
+  - name: sales_long
+    schema: store STRING, quarter STRING, amount INT
+    rows:
+      - ["s1", "Q1", 10]
+      - ["s1", "Q1", 5]
+      - ["s1", "Q2", 20]
+      - ["s2", "Q3", 7]
+
+solution: |
+  from pyspark.sql import functions as F
+
+  def solve(spark, sales_long):
+      # Passing the value list explicitly keeps Q3 in the schema for s1 and
+      # avoids the discovery pass over the data.
+      return (
+          sales_long
+          .groupBy("store")
+          .pivot("quarter", ["Q1", "Q2", "Q3"])
+          .agg(F.sum("amount"))
+          .fillna(0, subset=["Q1", "Q2", "Q3"])
+      )
+
+compare:
+  mode: rows
+  check_schema: false

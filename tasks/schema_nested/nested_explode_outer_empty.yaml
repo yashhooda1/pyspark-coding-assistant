@@ -1,0 +1,33 @@
+id: nested_explode_outer_empty
+category: schema_nested
+difficulty: medium
+probes: >
+  explode() drops rows whose array is empty or null; explode_outer() keeps them
+  with a NULL element. The fixture contains one empty array and one null array,
+  so the two functions give different row counts.
+tags: [explode, arrays, null_semantics]
+
+prompt: |
+  Flatten the tags array in `docs` so there is one row per tag, KEEPING documents
+  that have an empty or null tags array (their tag should be null).
+
+  Return columns: doc_id, tag.
+
+fixtures:
+  - name: docs
+    schema: doc_id INT, tags ARRAY<STRING>
+    rows:
+      - [1, ["x", "y"]]
+      - [2, []]
+      - [3, null]
+      - [4, ["z"]]
+
+solution: |
+  from pyspark.sql import functions as F
+
+  def solve(spark, docs):
+      # explode() would silently drop docs 2 and 3.
+      return docs.select("doc_id", F.explode_outer("tags").alias("tag"))
+
+compare:
+  mode: rows
