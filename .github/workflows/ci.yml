@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check spark_eval tests
+
+      - name: Validate task files
+        run: spark-eval validate
+
+      # Hard gate: a reference solution that does not execute makes every
+      # score against that task meaningless.
+      - name: Reference solutions execute
+        run: spark-eval selfcheck
+
+      # The real gate: proves the harness rejects plausible wrong answers.
+      - name: Tests (including mutation tests)
+        run: pytest -q
+
+      # End-to-end smoke test of the runner with no model server needed.
+      - name: Runner end-to-end
+        run: |
+          spark-eval run --model dummy:reference --out /tmp/ref.json
+          python - <<'PY'
+          import json, sys
+          r = json.load(open("/tmp/ref.json"))
+          assert r["pass_at_1"] == 1.0, f'reference model scored {r["pass_at_1"]}, expected 1.0'
+          print(f'ok: {r["n_tasks"]} tasks, pass@1 = {r["pass_at_1"]}')
+          PY
